@@ -1,0 +1,240 @@
+# Load libraries for app.R
+library(shiny)
+library(tidyverse)
+
+# Define UI for app
+ui <- fluidPage(
+  titlePanel("Mouse Randomization App"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file1", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                           "text/comma-separated-values,text/plain",
+                           ".csv")),
+      tags$hr(),
+      textInput("exclude_ids", "Enter non-study mice IDs (comma separated)", value = ""),
+      tags$hr(),
+      numericInput("num_arms", "How many arms?", value = 1, min = 1),
+      uiOutput("arm_names_ui"),
+      tags$hr(),
+      uiOutput("mice_per_arm_ui"),
+      tags$hr(),
+      numericInput("num_seeds", "Number of seeds to try", value = 5000, min = 1),
+      sliderInput("weight_slider", "Adjust Weighting (0% = Between-subjects, 100% = Within-subjects)", min = 0, max = 100, value = 0),
+      actionButton("randomize", "Ready to Randomize"),
+      downloadButton("download_data", "Download Table")
+    ),
+    mainPanel(
+      plotOutput("initial_plot"),
+      tableOutput("contents"),
+      textOutput("best_seed_output"),
+      tableOutput("mean_flux_output"),
+      tableOutput("assignment_results"),
+      plotOutput("plot")
+    )
+  )
+)
+
+# Define server logic
+server <- function(input, output, session) {
+  data <- reactive({
+    req(input$file1)
+    
+    # Read the uploaded file with default assumptions
+    read.csv(input$file1$datapath, header = TRUE, sep = ",")
+  })
+  
+  filtered_data <- reactive({
+    df <- data()
+    
+    if (input$exclude_ids != "") {
+      # Get the IDs to exclude
+      exclude_ids <- strsplit(input$exclude_ids, ",")[[1]] %>% trimws()
+      
+      # Filter the data
+      df <- df %>% filter(!id %in% exclude_ids)
+    }
+    
+    df
+  })
+  
+  output$initial_plot <- renderPlot({
+    df <- data()
+    
+    # Order by total_flux
+    order_by_flux <- df %>% arrange(total_flux) %>% pull(id)
+    
+    df %>%
+      ggplot(aes(x = factor(id, levels = order_by_flux), y = total_flux, color = imaging_date)) +
+      geom_point() +
+      scale_color_manual(values = setNames(rainbow(length(unique(df$imaging_date))), unique(df$imaging_date))) +
+      scale_y_log10() +
+      labs(x = "Mouse Number", y = "Total Flux", color = "Imaging Date") +
+      theme_minimal()
+  })
+  
+  output$arm_names_ui <- renderUI({
+    num_arms <- input$num_arms
+    
+    if (num_arms > 0) {
+      lapply(1:num_arms, function(i) {
+        textInput(paste0("arm_", i), paste("Name of arm", i))
+      })
+    }
+  })
+  
+  output$mice_per_arm_ui <- renderUI({
+    num_arms <- input$num_arms
+    
+    if (num_arms > 0) {
+      lapply(1:num_arms, function(i) {
+        numericInput(paste0("mice_per_arm_", i), paste("Number of mice in arm", i), value = 1, min = 1)
+      })
+    }
+  })
+  
+  assign_groups <- function(data, num_groups, num_per_group) {
+    # Create an empty vector to store group assignments
+    trt <- integer(nrow(data))
+    
+    # Create a data frame to store mean total_flux for each group
+    mean_total_flux <- data.frame(Group = 1:num_groups, Mean_Total_Flux = numeric(num_groups))
+    
+    # Shuffle the data to randomize assignments
+    data <- data[sample(nrow(data)), ]
+    for (i in 1:num_groups) {
+      # Select a subset of data for each group
+      group_data <- data[((i - 1) * num_per_group + 1):(i * num_per_group), ]
+      
+      # Calculate mean total_flux for the group
+      mean_flux <- mean(group_data$total_flux)
+      
+      # Assign the group number to the trt column
+      trt[((i - 1) * num_per_group + 1):(i * num_per_group)] <- i
+      
+      # Store the mean total_flux in the mean_total_flux data frame
+      mean_total_flux[i, 2] <- mean_flux
+    }
+    
+    # Add the trt column to the data frame
+    data$trt <- trt
+    
+    # Return the data frame with group assignments
+    return(list(Data = data, Mean_Total_Flux = mean_total_flux))
+  }
+  
+  observeEvent(input$randomize, {
+    req(input$num_arms)
+    num_arms <- input$num_arms
+    arm_names <- sapply(1:num_arms, function(i) input[[paste0("arm_", i)]])
+    num_per_arm <- sapply(1:num_arms, function(i) input[[paste0("mice_per_arm_", i)]])
+    num_seeds <- input$num_seeds
+    weight_within <- input$weight_slider / 100
+    weight_between <- 1 - weight_within
+    
+    filtered_df <- filtered_data()
+    
+    # Initialize variables to store the best seed and its corresponding variability
+    best_seed <- NULL
+    best_variability <- Inf
+    
+    withProgress(message = 'Randomizing...', value = 0, {
+      for (seed in 1:num_seeds) {
+        set.seed(seed)
+        
+        # Call the function to assign groups using filtered_data
+        result <- assign_groups(filtered_df, num_arms, num_per_arm)
+        
+        # Calculate the variability between and within groups
+        between_group_variability <- sd(result$Mean_Total_Flux$Mean_Total_Flux)
+        within_group_variability <- result$Data %>%
+          group_by(trt) %>%
+          summarise(within_sd = sd(total_flux)) %>%
+          summarise(total_within_sd = sum(within_sd)) %>%
+          pull(total_within_sd)
+        
+        total_variability <- (weight_between * between_group_variability) + (weight_within * within_group_variability)
+        
+        # Check if this seed has lower variability than the current best
+        if (total_variability < best_variability) {
+          best_variability <- total_variability
+          best_seed <- seed
+        }
+        
+        # Update progress
+        incProgress(1 / num_seeds, detail = paste("Seed", seed))
+      }
+    })
+    
+    # Print the seed with the least variability
+    output$best_seed_output <- renderText({
+      paste("Seed with the least variability:", best_seed)
+    })
+    
+    set.seed(best_seed)
+    final_result <- assign_groups(filtered_df, num_arms, num_per_arm)
+    
+    # Add arm names based on the trt column
+    final_result$Data <- final_result$Data %>%
+      mutate(Arm = factor(trt, levels = 1:num_arms, labels = arm_names))
+    
+    # Include non-study mice
+    all_data <- data()
+    if (input$exclude_ids != "") {
+      exclude_ids <- strsplit(input$exclude_ids, ",")[[1]] %>%
+        trimws()
+      non_study_data <- all_data %>%
+        filter(id %in% exclude_ids) %>%
+        mutate(Arm = "Non-study")
+      
+      final_result$Data <- bind_rows(final_result$Data, non_study_data)
+    }
+    
+    final_result$Data <- final_result$Data %>%
+      select(-trt) %>%
+      arrange(id) %>%
+      relocate(Arm, .before = imaging_date)
+    
+    output$assignment_results <- renderTable({
+      final_result$Data
+    })
+    
+    # Calculate and display mean flux for each arm
+    mean_flux_values <- final_result$Data %>%
+      group_by(Arm) %>%
+      summarise(mean_flux = mean(total_flux))
+    
+    output$mean_flux_output <- renderTable({
+      mean_flux_values
+    }, colnames = TRUE, rownames = FALSE)
+    
+    output$plot <- renderPlot({
+      processed_data <- final_result$Data
+      processed_data$trt <- factor(processed_data$Arm, levels = unique(processed_data$Arm[order(processed_data$Arm)]))
+      
+      ggplot(data = processed_data,
+             aes(x = trt, y = total_flux, color = trt, label = id)) +
+        geom_jitter(position = position_dodge2(width = 0.7), size = 3) +
+        geom_text(position = position_dodge2(width = 0.7), vjust = -1, size = 3) +
+        labs(x = "Treatment", y = "Flux [p/s]", color = "Treatment") +
+        theme_minimal()
+    })
+    
+    output$download_data <- downloadHandler(
+      filename = function() {
+        paste("assignment_results-", Sys.Date(), ".csv", sep = "")
+      },
+      content = function(file) {
+        write.csv(final_result$Data, file, row.names = FALSE)
+      }
+    )
+  })
+  
+  output$contents <- renderTable({
+    filtered_data()
+  })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
