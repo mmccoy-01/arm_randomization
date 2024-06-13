@@ -20,8 +20,10 @@ ui <- fluidPage(
       tags$hr(),
       uiOutput("mice_per_arm_ui"),
       tags$hr(),
+      textInput("seed_input", "Enter seed value (optional)", value = ""),
       numericInput("num_seeds", "Number of seeds to try", value = 5000, min = 1),
       sliderInput("weight_slider", "Adjust Weighting (0% = Between-subjects, 100% = Within-subjects)", min = 0, max = 100, value = 0),
+      radioButtons("randomize_by", "Randomize by:", choices = list("Flux" = "total_flux", "Radiance" = "avg_radiance"), selected = "total_flux"),
       actionButton("randomize", "Ready to Randomize"),
       downloadButton("download_data", "Download Table")
     ),
@@ -29,7 +31,7 @@ ui <- fluidPage(
       plotOutput("initial_plot"),
       tableOutput("contents"),
       textOutput("best_seed_output"),
-      tableOutput("mean_flux_output"),
+      tableOutput("mean_value_output"),
       tableOutput("assignment_results"),
       plotOutput("plot")
     )
@@ -62,15 +64,18 @@ server <- function(input, output, session) {
   output$initial_plot <- renderPlot({
     df <- data()
     
-    # Order by total_flux
-    order_by_flux <- df %>% arrange(total_flux) %>% pull(id)
+    # Get the column to plot based on user selection
+    column_to_plot <- input$randomize_by
+    
+    # Order by the selected column
+    order_by_value <- df %>% arrange(!!sym(column_to_plot)) %>% pull(id)
     
     df %>%
-      ggplot(aes(x = factor(id, levels = order_by_flux), y = total_flux, color = imaging_date)) +
+      ggplot(aes(x = factor(id, levels = order_by_value), y = !!sym(column_to_plot), color = imaging_date)) +
       geom_point() +
       scale_color_manual(values = setNames(rainbow(length(unique(df$imaging_date))), unique(df$imaging_date))) +
       scale_y_log10() +
-      labs(x = "Mouse Number", y = "Total Flux", color = "Imaging Date") +
+      labs(x = "Mouse Number", y = ifelse(column_to_plot == "total_flux", "Total Flux", "Average Radiance"), color = "Imaging Date") +
       theme_minimal()
   })
   
@@ -94,12 +99,12 @@ server <- function(input, output, session) {
     }
   })
   
-  assign_groups <- function(data, num_groups, num_per_group) {
+  assign_groups <- function(data, num_groups, num_per_group, column) {
     # Create an empty vector to store group assignments
     trt <- integer(nrow(data))
     
-    # Create a data frame to store mean total_flux for each group
-    mean_total_flux <- data.frame(Group = 1:num_groups, Mean_Total_Flux = numeric(num_groups))
+    # Create a data frame to store mean values for each group
+    mean_values <- data.frame(Group = 1:num_groups, Mean_Value = numeric(num_groups))
     
     # Shuffle the data to randomize assignments
     data <- data[sample(nrow(data)), ]
@@ -107,21 +112,21 @@ server <- function(input, output, session) {
       # Select a subset of data for each group
       group_data <- data[((i - 1) * num_per_group + 1):(i * num_per_group), ]
       
-      # Calculate mean total_flux for the group
-      mean_flux <- mean(group_data$total_flux)
+      # Calculate mean value for the group
+      mean_value <- mean(group_data[[column]])
       
       # Assign the group number to the trt column
       trt[((i - 1) * num_per_group + 1):(i * num_per_group)] <- i
       
-      # Store the mean total_flux in the mean_total_flux data frame
-      mean_total_flux[i, 2] <- mean_flux
+      # Store the mean value in the mean_values data frame
+      mean_values[i, 2] <- mean_value
     }
     
     # Add the trt column to the data frame
     data$trt <- trt
     
     # Return the data frame with group assignments
-    return(list(Data = data, Mean_Total_Flux = mean_total_flux))
+    return(list(Data = data, Mean_Values = mean_values))
   }
   
   observeEvent(input$randomize, {
@@ -130,8 +135,10 @@ server <- function(input, output, session) {
     arm_names <- sapply(1:num_arms, function(i) input[[paste0("arm_", i)]])
     num_per_arm <- sapply(1:num_arms, function(i) input[[paste0("mice_per_arm_", i)]])
     num_seeds <- input$num_seeds
+    seed_input <- input$seed_input
     weight_within <- input$weight_slider / 100
     weight_between <- 1 - weight_within
+    column_to_randomize <- input$randomize_by
     
     filtered_df <- filtered_data()
     
@@ -139,41 +146,63 @@ server <- function(input, output, session) {
     best_seed <- NULL
     best_variability <- Inf
     
-    withProgress(message = 'Randomizing...', value = 0, {
-      for (seed in 1:num_seeds) {
-        set.seed(seed)
-        
-        # Call the function to assign groups using filtered_data
-        result <- assign_groups(filtered_df, num_arms, num_per_arm)
-        
-        # Calculate the variability between and within groups
-        between_group_variability <- sd(result$Mean_Total_Flux$Mean_Total_Flux)
-        within_group_variability <- result$Data %>%
-          group_by(trt) %>%
-          summarise(within_sd = sd(total_flux)) %>%
-          summarise(total_within_sd = sum(within_sd)) %>%
-          pull(total_within_sd)
-        
-        total_variability <- (weight_between * between_group_variability) + (weight_within * within_group_variability)
-        
-        # Check if this seed has lower variability than the current best
-        if (total_variability < best_variability) {
-          best_variability <- total_variability
-          best_seed <- seed
+    if (seed_input != "") {
+      # If a specific seed is provided, use that seed
+      set.seed(as.numeric(seed_input))
+      result <- assign_groups(filtered_df, num_arms, num_per_arm, column_to_randomize)
+      
+      between_group_variability <- sd(result$Mean_Values$Mean_Value)
+      within_group_variability <- result$Data %>%
+        group_by(trt) %>%
+        summarise(within_sd = sd(!!sym(column_to_randomize))) %>%
+        summarise(total_within_sd = sum(within_sd)) %>%
+        pull(total_within_sd)
+      
+      total_variability <- (weight_between * between_group_variability) + (weight_within * within_group_variability)
+      
+      best_seed <- as.numeric(seed_input)
+      best_variability <- total_variability
+      
+      output$best_seed_output <- renderText({
+        paste("Seed inputted by user:", best_seed)
+      })
+    } else {
+      withProgress(message = 'Randomizing...', value = 0, {
+        for (seed in 1:num_seeds) {
+          set.seed(seed)
+          
+          # Call the function to assign groups using filtered_data
+          result <- assign_groups(filtered_df, num_arms, num_per_arm, column_to_randomize)
+          
+          # Calculate the variability between and within groups
+          between_group_variability <- sd(result$Mean_Values$Mean_Value)
+          within_group_variability <- result$Data %>%
+            group_by(trt) %>%
+            summarise(within_sd = sd(!!sym(column_to_randomize))) %>%
+            summarise(total_within_sd = sum(within_sd)) %>%
+            pull(total_within_sd)
+          
+          total_variability <- (weight_between * between_group_variability) + (weight_within * within_group_variability)
+          
+          # Check if this seed has lower variability than the current best
+          if (total_variability < best_variability) {
+            best_variability <- total_variability
+            best_seed <- seed
+          }
+          
+          # Update progress
+          incProgress(1 / num_seeds, detail = paste("Seed", seed))
         }
-        
-        # Update progress
-        incProgress(1 / num_seeds, detail = paste("Seed", seed))
-      }
-    })
-    
-    # Print the seed with the least variability
-    output$best_seed_output <- renderText({
-      paste("Seed with the least variability:", best_seed)
-    })
+      })
+      
+      # Print the seed with the least variability
+      output$best_seed_output <- renderText({
+        paste("Seed with the least variability:", best_seed)
+      })
+    }
     
     set.seed(best_seed)
-    final_result <- assign_groups(filtered_df, num_arms, num_per_arm)
+    final_result <- assign_groups(filtered_df, num_arms, num_per_arm, column_to_randomize)
     
     # Add arm names based on the trt column
     final_result$Data <- final_result$Data %>%
@@ -200,13 +229,13 @@ server <- function(input, output, session) {
       final_result$Data
     })
     
-    # Calculate and display mean flux for each arm
-    mean_flux_values <- final_result$Data %>%
+    # Calculate and display mean values for each arm
+    mean_values <- final_result$Data %>%
       group_by(Arm) %>%
-      summarise(mean_flux = mean(total_flux))
+      summarise(mean_value = mean(!!sym(column_to_randomize)))
     
-    output$mean_flux_output <- renderTable({
-      mean_flux_values
+    output$mean_value_output <- renderTable({
+      mean_values
     }, colnames = TRUE, rownames = FALSE)
     
     output$plot <- renderPlot({
@@ -214,10 +243,10 @@ server <- function(input, output, session) {
       processed_data$trt <- factor(processed_data$Arm, levels = unique(processed_data$Arm[order(processed_data$Arm)]))
       
       ggplot(data = processed_data,
-             aes(x = trt, y = total_flux, color = trt, label = id)) +
+             aes(x = trt, y = !!sym(column_to_randomize), color = trt, label = id)) +
         geom_jitter(position = position_dodge2(width = 0.7), size = 3) +
         geom_text(position = position_dodge2(width = 0.7), vjust = -1, size = 3) +
-        labs(x = "Treatment", y = "Flux [p/s]", color = "Treatment") +
+        labs(x = "Treatment", y = ifelse(column_to_randomize == "total_flux", "Flux [p/s]", "Radiance [p/s]"), color = "Treatment") +
         theme_minimal()
     })
     
