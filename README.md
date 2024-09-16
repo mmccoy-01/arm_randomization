@@ -7,4 +7,4 @@ The user uploads a .csv file of bioluminescent mouse data computed from Living I
 This is how your columns should be named:
 cage_number,	id,	ear_punch,	imaging_date,	total_flux,	avg_radiance
 
-* imaging_date is in ISO 8601 international standard which expresses a day as “2001-02-13” (yyyy-mm-dd)
+* imaging_date is in ISO 8601 international standard which expresses a date as “2001-02-13” (yyyy-mm-dd)
