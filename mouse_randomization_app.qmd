@@ -232,15 +232,14 @@ server <- function(input, output, session) {
         labs(x = "Treatment", y = ifelse(column_to_randomize == "total_flux", "Flux [p/s]", "Radiance [p/s/cm²/sr]"), color = "Treatment") +
         theme_minimal()
     })
-    
-    output$download_data <- downloadHandler(
-      filename = function() {
-        paste("assignment_results-", Sys.Date(), ".csv", sep = "")
-      },
-      content = function(file) {
-        write.csv(final_result$Data, file, row.names = FALSE)
-      }
-    )
+output$download_data <- downloadHandler(
+  filename = function() {
+    paste(Sys.Date(), ".csv", sep = "")
+  },
+  content = function(file) {
+    write.csv(final_result$Data, file, row.names = FALSE)
+  }
+)
   })
   
   output$contents <- renderTable({
