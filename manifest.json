@@ -16,14 +16,14 @@
       }
     ],
     "files": {
-      "mouse_randomization_app.R": {
-        "checksum": "14c16be7376bdbe776adad2ee8df1eca"
+      "mouse_randomization_app.qmd": {
+        "checksum": "8a61a3ca587f9dd2f790fa484875a197"
       }
     },
     "metadata": {
       "appmode": "shiny",
       "primary_rmd": null,
       "primary_html": null,
-      "primary_r": "mouse_randomization_app.R"
+      "primary_r": "mouse_randomization_app.qmd"
     }
   }
